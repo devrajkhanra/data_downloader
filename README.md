@@ -1,10 +1,10 @@
-# Upstox NSE Index Data Downloader
+# Upstox NSE Market Data Downloader
 
 A modular command-line downloader for historical five-minute NSE broad-market
-and sectoral index candles from Upstox.
+and sectoral index candles, plus NSE cash-equity instruments, from Upstox.
 
-This version downloads NSE index data. The previous hard-coded May 2026 futures
-selection is not included because that contract has expired.
+The previous hard-coded May 2026 futures selection is not included because
+that contract has expired.
 
 ## Requirements
 
@@ -31,9 +31,33 @@ or:
 python -m market_data_downloader
 ```
 
-Choose broad indices, sectoral indices, all supported indices, or one index.
-The access token is requested without echoing it to the terminal; do not put it
-in the source code.
+Choose broad indices, sectoral indices, all supported indices, one index, or all
+NSE cash-equity instruments. The access token is requested without echoing it
+to the terminal; do not put it in the source code.
+
+### NSE stocks
+
+The stock option refreshes the official NSE
+[Securities Available for Trading CSV](https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv)
+and includes only rows whose `SERIES` is `EQ`. The refreshed list is saved as
+`EQUITY_L.csv`. NSE ISINs are matched to Upstox `NSE_EQ` instrument keys, so
+delisted, suspended, or other non-`EQ` series are excluded. Current NSE symbols
+and company names are used; active listings without an Upstox key are reported
+and skipped. If the NSE refresh fails, an existing local list can be used after
+the user confirms; the downloader warns that this snapshot may be outdated.
+
+The menu displays the current instrument count and asks for confirmation before
+starting. NSE industry lookups assign each instrument to its official sector;
+unclassified entries go under `unclassified`. Lookup results are cached for 30
+days in `data/.stock_industry_cache.json`, and the cache is not committed.
+The first lookup may take a long time; NSE must be reachable and may rate-limit
+requests. If the lookup fails, the downloader stops before downloading stocks
+rather than guessing sectors.
+
+Downloading thousands of instruments can also take a long time and use
+substantial Upstox API quota and disk space. Progress is reported, and rerunning
+the downloader resumes each CSV independently. Existing flat stock CSVs are
+moved into their sector folders and merged if a destination already exists.
 
 ### Broad-market indices
 
@@ -84,16 +108,15 @@ The instrument keys for these catalogs are verified against Upstox's
 
 ## Dates and resuming
 
-For each selected index, the downloader reads that index's CSV and starts from
-the day after its latest date. If an index has no CSV yet, it asks for an
-initial `YYYY-MM-DD` start date. When a group contains both existing and new
-indexes, the new indexes use the entered date while existing indexes resume
-independently.
+For each selected instrument, the downloader reads its CSV and starts from the
+day after its latest date. If any selected instrument has no CSV yet, it asks
+for an initial `YYYY-MM-DD` start date. Existing instruments resume
+independently from their own CSV dates.
 
 ## Output layout
 
 CSV files are saved under the project folder, regardless of the terminal's
-current working directory. Each index has its own folder and CSV:
+current working directory. Each instrument has its own folder and CSV:
 
 ```text
 data/
@@ -109,9 +132,21 @@ data/
     nifty-bank/
       nifty-bank_data.csv
     ...
+  stocks/
+    oil-gas-consumable-fuels/
+      reliance/
+        reliance_data.csv
+    information-technology/
+      tcs/
+        tcs_data.csv
+    unclassified/
+    ...
 ```
 
-The filename pattern is `data/<group>/<index-slug>/<index-slug>_data.csv`.
+Index files follow
+`data/<group>/<instrument-slug>/<instrument-slug>_data.csv`. Stock files
+follow
+`data/stocks/<sector-slug>/<stock-slug>/<stock-slug>_data.csv`.
 Existing Nifty 50 data is now at
 `data/broad_indices/nifty50/nifty50_data.csv`.
 
@@ -133,16 +168,19 @@ market_data_downloader/
   catalog.py       # Supported index definitions and instrument keys
   cli.py           # Interactive command-line interface
   date_ranges.py   # Date parsing and API-sized ranges
-  downloader.py    # Per-index resume and download workflow
-  models.py        # Index and candle types
-  paths.py         # Project and data roots
-  storage.py       # CSV read, merge, and write operations
-  upstox_client.py # Upstox V3 HTTP client
+  downloader.py    # Per-instrument resume and download workflow
+  models.py        # Instrument and candle types
+  nse_industries.py # NSE industry lookup and local cache
+  paths.py          # Project and data roots
+  sessions.py       # Shared HTTP retries
+  stock_catalog.py  # Dynamic NSE cash-equity catalog
+  storage.py        # CSV read, merge, and write operations
+  upstox_client.py  # Upstox V3 HTTP client
 tests/             # Offline unit tests
 ```
 
-To add an index, add an `IndexInstrument` entry to the appropriate catalog in
-`market_data_downloader/catalog.py` with its Upstox key and a unique slug.
+To add a supported index, add an instrument entry to the appropriate catalog
+in `market_data_downloader/catalog.py` with its Upstox key and a unique slug.
 
 Run the offline tests with:
 

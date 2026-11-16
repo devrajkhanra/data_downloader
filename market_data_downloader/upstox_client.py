@@ -3,11 +3,10 @@ from urllib.parse import quote
 from typing import cast
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from market_data_downloader.date_ranges import month_ranges
 from market_data_downloader.models import Candle
+from market_data_downloader.sessions import create_retrying_session
 
 
 API_BASE_URL = "https://api.upstox.com/v3"
@@ -17,22 +16,9 @@ REQUEST_TIMEOUT_SECONDS = 30
 class UpstoxApiError(RuntimeError):
     """Raised when an Upstox historical-data request cannot be completed."""
 
-
-def _create_session() -> requests.Session:
-    retry = Retry(
-        total=4,
-        connect=4,
-        read=4,
-        status=4,
-        backoff_factor=1,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET"}),
-        respect_retry_after_header=True,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session = requests.Session()
-    session.mount("https://", adapter)
-    return session
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class UpstoxClient:
@@ -44,7 +30,7 @@ class UpstoxClient:
     ) -> None:
         if not access_token.strip():
             raise ValueError("Access token is required.")
-        self._session = session or _create_session()
+        self._session = session if session is not None else create_retrying_session()
         self._timeout = timeout
         self._headers = {
             "Authorization": f"Bearer {access_token}",
@@ -78,9 +64,12 @@ class UpstoxClient:
                 )
                 response.raise_for_status()
             except requests.RequestException as exc:
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
                 raise UpstoxApiError(
                     f"Request failed for {instrument_key} "
-                    f"({chunk_start} through {chunk_end}): {exc}"
+                    f"({chunk_start} through {chunk_end}): {exc}",
+                    status_code=status_code,
                 ) from exc
 
             try:
@@ -95,7 +84,8 @@ class UpstoxClient:
                     else "Unexpected API response"
                 )
                 raise UpstoxApiError(
-                    f"Upstox API error for {instrument_key}: {message}"
+                    f"Upstox API error for {instrument_key}: {message}",
+                    status_code=getattr(response, "status_code", None),
                 )
 
             data = payload.get("data")

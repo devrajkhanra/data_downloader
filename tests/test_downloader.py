@@ -4,7 +4,8 @@ from datetime import date
 from pathlib import Path
 
 from market_data_downloader.catalog import BROAD_INDICES
-from market_data_downloader.downloader import download_index, next_start_date
+from market_data_downloader.downloader import download_instrument, next_start_date
+from market_data_downloader.models import InstrumentCategory, MarketInstrument
 from market_data_downloader.storage import data_file_path, save_candles
 
 
@@ -54,7 +55,7 @@ class DownloaderTests(unittest.TestCase):
             root = Path(directory)
             client = FakeClient()
             instrument = BROAD_INDICES[0]
-            saved = download_index(
+            saved = download_instrument(
                 client,
                 root,
                 instrument,
@@ -65,6 +66,38 @@ class DownloaderTests(unittest.TestCase):
             self.assertEqual(saved, 1)
             self.assertTrue(data_file_path(root, instrument).exists())
             self.assertEqual(client.calls[0][0], instrument.instrument_key)
+
+    def test_download_writes_stock_to_its_symbol_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient()
+            stock = MarketInstrument(
+                name="Example Corp",
+                instrument_key="NSE_EQ|INE000A01001",
+                category=InstrumentCategory.STOCKS,
+                slug="example",
+                tradingsymbol="EXAMPLE",
+                sector_slug="information-technology",
+            )
+
+            saved = download_instrument(
+                client,
+                root,
+                stock,
+                date(2026, 10, 27),
+                date(2026, 10, 27),
+            )
+
+            self.assertEqual(saved, 1)
+            self.assertEqual(
+                data_file_path(root, stock),
+                root
+                / "stocks"
+                / "information-technology"
+                / "example"
+                / "example_data.csv",
+            )
+            self.assertTrue(data_file_path(root, stock).exists())
 
 
 if __name__ == "__main__":

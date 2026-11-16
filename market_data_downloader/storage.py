@@ -5,7 +5,11 @@ from datetime import date
 from pathlib import Path
 from typing import Iterable
 
-from market_data_downloader.models import Candle, IndexInstrument
+from market_data_downloader.models import (
+    Candle,
+    InstrumentCategory,
+    MarketInstrument,
+)
 
 
 CSV_HEADER = (
@@ -19,7 +23,16 @@ CSV_HEADER = (
 )
 
 
-def data_file_path(data_root: Path, instrument: IndexInstrument) -> Path:
+def data_file_path(data_root: Path, instrument: MarketInstrument) -> Path:
+    if instrument.category is InstrumentCategory.STOCKS:
+        sector_slug = instrument.sector_slug or "unclassified"
+        return (
+            data_root
+            / instrument.category.value
+            / sector_slug
+            / instrument.slug
+            / f"{instrument.slug}_data.csv"
+        )
     return (
         data_root
         / instrument.category.value
@@ -32,7 +45,6 @@ def get_last_date_from_csv(filename: Path) -> date | None:
     if not filename.exists():
         return None
 
-    latest_date: date | None = None
     with filename.open("r", newline="", encoding="utf-8-sig") as file:
         reader = csv.reader(file)
         header = next(reader, None)
@@ -41,20 +53,70 @@ def get_last_date_from_csv(filename: Path) -> date | None:
         if tuple(header) != CSV_HEADER:
             raise ValueError(f"Unexpected CSV header in {filename}.")
 
-        for row_number, row in enumerate(reader, start=2):
-            if not row:
-                continue
-            if len(row) != len(CSV_HEADER) or not row[0]:
-                raise ValueError(f"Invalid candle row {row_number} in {filename}.")
-            try:
-                candle_date = date.fromisoformat(row[0].split("T", 1)[0])
-            except ValueError as exc:
-                raise ValueError(
-                    f"Invalid timestamp on row {row_number} in {filename}."
-                ) from exc
-            latest_date = max(latest_date, candle_date) if latest_date else candle_date
+    with filename.open("rb") as file:
+        end = file.seek(0, os.SEEK_END)
+        while end > 0:
+            file.seek(end - 1)
+            if file.read(1) not in (b"\n", b"\r"):
+                break
+            end -= 1
+        if end == 0:
+            return None
 
-    return latest_date
+        start = end
+        while start > 0:
+            file.seek(start - 1)
+            if file.read(1) == b"\n":
+                break
+            start -= 1
+        file.seek(start)
+        line = file.read(end - start)
+        row = next(csv.reader([line.decode("utf-8-sig")]), None)
+
+    if row is None or tuple(row) == CSV_HEADER:
+        return None
+    if len(row) != len(CSV_HEADER) or not row[0]:
+        raise ValueError(f"Invalid final candle row in {filename}.")
+    try:
+        return date.fromisoformat(row[0].split("T", 1)[0])
+    except ValueError as exc:
+        raise ValueError(f"Invalid timestamp in final row of {filename}.") from exc
+
+
+def migrate_legacy_stock_file(
+    data_root: Path,
+    instrument: MarketInstrument,
+) -> bool:
+    if instrument.category is not InstrumentCategory.STOCKS:
+        return False
+
+    current_path = data_file_path(data_root, instrument)
+    legacy_slugs = dict.fromkeys((instrument.slug, *instrument.legacy_slugs))
+    migrated = False
+    for legacy_slug in legacy_slugs:
+        legacy_path = (
+            data_root
+            / instrument.category.value
+            / legacy_slug
+            / f"{legacy_slug}_data.csv"
+        )
+        if legacy_path == current_path or not legacy_path.exists():
+            continue
+
+        if current_path.exists():
+            with legacy_path.open("r", newline="", encoding="utf-8-sig") as file:
+                reader = csv.reader(file)
+                header = next(reader, None)
+                if tuple(header or ()) != CSV_HEADER:
+                    raise ValueError(f"Unexpected CSV header in {legacy_path}.")
+                rows = list(reader)
+            save_candles(current_path, rows)
+            legacy_path.unlink()
+        else:
+            current_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(legacy_path, current_path)
+        migrated = True
+    return migrated
 
 
 def save_candles(filename: Path, candles: Iterable[Candle]) -> int:

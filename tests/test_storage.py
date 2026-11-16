@@ -5,11 +5,16 @@ from datetime import date
 from pathlib import Path
 
 from market_data_downloader.catalog import BROAD_INDICES
-from market_data_downloader.models import IndexCategory
+from market_data_downloader.models import (
+    IndexCategory,
+    InstrumentCategory,
+    MarketInstrument,
+)
 from market_data_downloader.storage import (
     CSV_HEADER,
     data_file_path,
     get_last_date_from_csv,
+    migrate_legacy_stock_file,
     save_candles,
 )
 
@@ -49,6 +54,105 @@ class StorageTests(unittest.TestCase):
             filename.write_text("existing", encoding="utf-8")
             self.assertEqual(save_candles(filename, []), 0)
             self.assertEqual(filename.read_text(encoding="utf-8"), "existing")
+
+    def test_latest_date_reads_last_row_and_ignores_trailing_blank_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            filename = Path(directory) / "data.csv"
+            with filename.open("w", newline="", encoding="utf-8") as file:
+                writer = csv.writer(file)
+                writer.writerow(CSV_HEADER)
+                writer.writerow(["2026-10-26T15:25:00+05:30", 1, 1, 1, 1, 0, 0])
+                writer.writerow(["2026-10-27T09:15:00+05:30", 2, 2, 2, 2, 0, 0])
+                file.write("\n")
+
+            self.assertEqual(get_last_date_from_csv(filename), date(2026, 10, 27))
+
+    def test_stock_migration_merges_legacy_file_into_sector_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stock = MarketInstrument(
+                name="Example Corp",
+                instrument_key="NSE_EQ|INE000A01001",
+                category=InstrumentCategory.STOCKS,
+                slug="example",
+                tradingsymbol="EXAMPLE",
+                sector_slug="information-technology",
+            )
+            legacy_path = root / "stocks" / "example" / "example_data.csv"
+            target_path = data_file_path(root, stock)
+            save_candles(
+                legacy_path,
+                [["2026-10-26T15:25:00+05:30", 1, 1, 1, 1, 0, 0]],
+            )
+            save_candles(
+                target_path,
+                [["2026-10-27T09:15:00+05:30", 2, 2, 2, 2, 0, 0]],
+            )
+
+            self.assertTrue(migrate_legacy_stock_file(root, stock))
+
+            with target_path.open("r", newline="", encoding="utf-8") as file:
+                rows = list(csv.reader(file))
+            self.assertEqual(len(rows), 3)
+            self.assertFalse(legacy_path.exists())
+            self.assertEqual(get_last_date_from_csv(target_path), date(2026, 10, 27))
+
+    def test_stock_migration_merges_legacy_file_into_sector_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stock = MarketInstrument(
+                name="Example Corp",
+                instrument_key="NSE_EQ|INE000A01001",
+                category=InstrumentCategory.STOCKS,
+                slug="example",
+                tradingsymbol="EXAMPLE",
+                sector_slug="information-technology",
+            )
+            legacy_path = root / "stocks" / "example" / "example_data.csv"
+            target_path = data_file_path(root, stock)
+            save_candles(
+                legacy_path,
+                [["2026-10-26T15:25:00+05:30", 1, 1, 1, 1, 0, 0]],
+            )
+            save_candles(
+                target_path,
+                [["2026-10-27T09:15:00+05:30", 2, 2, 2, 2, 0, 0]],
+            )
+
+            self.assertTrue(migrate_legacy_stock_file(root, stock))
+
+            with target_path.open("r", newline="", encoding="utf-8") as file:
+                rows = list(csv.reader(file))
+            self.assertEqual(len(rows), 3)
+            self.assertFalse(legacy_path.exists())
+            self.assertEqual(get_last_date_from_csv(target_path), date(2026, 10, 27))
+
+    def test_stock_migration_finds_renamed_symbol_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stock = MarketInstrument(
+                name="New Company Name",
+                instrument_key="NSE_EQ|INE000A01001",
+                category=InstrumentCategory.STOCKS,
+                slug="newco",
+                tradingsymbol="NEWCO",
+                sector_slug="industrial-products",
+                legacy_slugs=("oldco",),
+            )
+            legacy_path = root / "stocks" / "oldco" / "oldco_data.csv"
+            save_candles(
+                legacy_path,
+                [["2026-10-26T15:25:00+05:30", 1, 1, 1, 1, 0, 0]],
+            )
+
+            self.assertTrue(migrate_legacy_stock_file(root, stock))
+
+            self.assertFalse(legacy_path.exists())
+            self.assertTrue(data_file_path(root, stock).exists())
+            self.assertEqual(
+                get_last_date_from_csv(data_file_path(root, stock)),
+                date(2026, 10, 26),
+            )
 
 
 if __name__ == "__main__":

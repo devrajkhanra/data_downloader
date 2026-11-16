@@ -1,14 +1,14 @@
 from datetime import date, timedelta
 from pathlib import Path
 
-from market_data_downloader.models import IndexInstrument
+from market_data_downloader.models import MarketInstrument
 from market_data_downloader.storage import data_file_path, get_last_date_from_csv, save_candles
 from market_data_downloader.upstox_client import UpstoxClient
 
 
 def next_start_date(
     data_root: Path,
-    instrument: IndexInstrument,
+    instrument: MarketInstrument,
     first_download_date: date | None,
 ) -> date:
     filename = data_file_path(data_root, instrument)
@@ -20,10 +20,10 @@ def next_start_date(
     return first_download_date
 
 
-def download_index(
+def download_instrument(
     client: UpstoxClient,
     data_root: Path,
-    instrument: IndexInstrument,
+    instrument: MarketInstrument,
     start_date: date,
     end_date: date,
 ) -> int:

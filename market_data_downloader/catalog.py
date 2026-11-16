@@ -1,12 +1,12 @@
-from market_data_downloader.models import IndexCategory, IndexInstrument
+from market_data_downloader.models import IndexCategory, MarketInstrument
 
 
 def _build_catalog(
     category: IndexCategory,
     entries: tuple[tuple[str, str, str], ...],
-) -> tuple[IndexInstrument, ...]:
+) -> tuple[MarketInstrument, ...]:
     return tuple(
-        IndexInstrument(
+        MarketInstrument(
             name=name,
             instrument_key=f"NSE_INDEX|{key}",
             category=category,
