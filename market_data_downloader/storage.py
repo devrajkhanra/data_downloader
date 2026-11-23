@@ -7,8 +7,10 @@ from typing import Iterable
 
 from market_data_downloader.models import (
     Candle,
+    DataInstrument,
     InstrumentCategory,
     MarketInstrument,
+    OptionContract,
 )
 
 
@@ -23,7 +25,19 @@ CSV_HEADER = (
 )
 
 
-def data_file_path(data_root: Path, instrument: MarketInstrument) -> Path:
+def data_file_path(data_root: Path, instrument: DataInstrument) -> Path:
+    if isinstance(instrument, OptionContract):
+        strike_slug = instrument.strike_price.replace(".", "-")
+        filename = f"{strike_slug}-{instrument.option_type}_data.csv"
+        return (
+            data_root
+            / "options"
+            / instrument.underlying_category
+            / instrument.underlying_slug
+            / instrument.expiry_type
+            / instrument.expiry_date.isoformat()
+            / filename
+        )
     if instrument.category is InstrumentCategory.STOCKS:
         sector_slug = instrument.sector_slug or "unclassified"
         return (

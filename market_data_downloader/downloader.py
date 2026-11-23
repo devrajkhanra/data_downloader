@@ -1,18 +1,36 @@
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Protocol
 
-from market_data_downloader.models import MarketInstrument
-from market_data_downloader.storage import data_file_path, get_last_date_from_csv, save_candles
-from market_data_downloader.upstox_client import UpstoxClient
+from market_data_downloader.data_repository import (
+    CsvMarketDataRepository,
+    MarketDataRepository,
+)
+from market_data_downloader.models import Candle, DataInstrument
+
+
+class HistoricalDataSource(Protocol):
+    def get_historical_candles(
+        self,
+        instrument_key: str,
+        start_date: date,
+        end_date: date,
+        interval_minutes: int = 5,
+    ) -> list[Candle]: ...
 
 
 def next_start_date(
     data_root: Path,
-    instrument: MarketInstrument,
+    instrument: DataInstrument,
     first_download_date: date | None,
+    repository: MarketDataRepository | None = None,
 ) -> date:
-    filename = data_file_path(data_root, instrument)
-    last_date = get_last_date_from_csv(filename)
+    data_repository = (
+        repository
+        if repository is not None
+        else CsvMarketDataRepository(data_root)
+    )
+    last_date = data_repository.latest_date(instrument)
     if last_date is not None:
         return last_date + timedelta(days=1)
     if first_download_date is None:
@@ -21,19 +39,27 @@ def next_start_date(
 
 
 def download_instrument(
-    client: UpstoxClient,
+    client: HistoricalDataSource,
     data_root: Path,
-    instrument: MarketInstrument,
+    instrument: DataInstrument,
     start_date: date,
     end_date: date,
+    *,
+    interval_minutes: int = 5,
+    repository: MarketDataRepository | None = None,
 ) -> int:
     if start_date > end_date:
         return 0
 
+    data_repository = (
+        repository
+        if repository is not None
+        else CsvMarketDataRepository(data_root)
+    )
     candles = client.get_historical_candles(
         instrument_key=instrument.instrument_key,
         start_date=start_date,
         end_date=end_date,
-        interval_minutes=5,
+        interval_minutes=interval_minutes,
     )
-    return save_candles(data_file_path(data_root, instrument), candles)
+    return data_repository.save(instrument, candles)

@@ -5,7 +5,11 @@ from pathlib import Path
 
 from market_data_downloader.catalog import BROAD_INDICES
 from market_data_downloader.downloader import download_instrument, next_start_date
-from market_data_downloader.models import InstrumentCategory, MarketInstrument
+from market_data_downloader.models import (
+    InstrumentCategory,
+    MarketInstrument,
+    OptionContract,
+)
 from market_data_downloader.storage import data_file_path, save_candles
 
 
@@ -98,6 +102,38 @@ class DownloaderTests(unittest.TestCase):
                 / "example_data.csv",
             )
             self.assertTrue(data_file_path(root, stock).exists())
+
+    def test_option_contract_uses_shared_download_and_resume_workflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            client = FakeClient()
+            contract = OptionContract(
+                name="NIFTY 2026-12-31 26000 CE",
+                instrument_key="NSE_FO|12345",
+                underlying_category="indices",
+                underlying_slug="nifty50",
+                expiry_type="monthly",
+                expiry_date=date(2026, 12, 31),
+                strike_price="26000",
+                option_type="CE",
+            )
+            filename = data_file_path(root, contract)
+
+            saved = download_instrument(
+                client,
+                root,
+                contract,
+                date(2026, 10, 27),
+                date(2026, 10, 27),
+            )
+
+            self.assertEqual(saved, 1)
+            self.assertEqual(client.calls[0][0], contract.instrument_key)
+            self.assertEqual(
+                next_start_date(root, contract, None),
+                date(2026, 10, 28),
+            )
+            self.assertTrue(filename.exists())
 
 
 if __name__ == "__main__":

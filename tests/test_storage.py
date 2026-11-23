@@ -9,6 +9,7 @@ from market_data_downloader.models import (
     IndexCategory,
     InstrumentCategory,
     MarketInstrument,
+    OptionContract,
 )
 from market_data_downloader.storage import (
     CSV_HEADER,
@@ -25,6 +26,29 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(
             filename,
             Path("data") / IndexCategory.BROAD.value / "nifty50" / "nifty50_data.csv",
+        )
+
+    def test_option_data_path_includes_underlying_expiry_and_strike(self):
+        contract = OptionContract(
+            name="NIFTY 2030-01-31 26000 CE",
+            instrument_key="NSE_FO|12345",
+            underlying_category="indices",
+            underlying_slug="nifty50",
+            expiry_type="monthly",
+            expiry_date=date(2030, 1, 31),
+            strike_price="26000",
+            option_type="CE",
+        )
+
+        self.assertEqual(
+            data_file_path(Path("data"), contract),
+            Path("data")
+            / "options"
+            / "indices"
+            / "nifty50"
+            / "monthly"
+            / "2030-01-31"
+            / "26000-CE_data.csv",
         )
 
     def test_save_merges_candles_without_duplicates_and_sorts_them(self):

@@ -1,4 +1,4 @@
-from market_data_downloader.cli import main
+from market_data_downloader.desktop import main
 
 
 if __name__ == "__main__":

@@ -30,12 +30,17 @@ class UpstoxClient:
     ) -> None:
         if not access_token.strip():
             raise ValueError("Access token is required.")
+        self._owns_session = session is None
         self._session = session if session is not None else create_retrying_session()
         self._timeout = timeout
         self._headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
         }
+
+    def close(self) -> None:
+        if self._owns_session:
+            self._session.close()
 
     def get_historical_candles(
         self,

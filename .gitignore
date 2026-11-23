@@ -1,4 +1,7 @@
 .venv/
+.venv-app/
 __pycache__/
 *.py[cod]
-/data/.stock_industry_cache.json
+# Downloaded market data and generated state; ignored recursively.
+/data/
+EQUITY_L.csv

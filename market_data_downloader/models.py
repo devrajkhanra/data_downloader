@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import date
 from enum import Enum
 from typing import TypeAlias
 
@@ -23,5 +24,18 @@ class MarketInstrument:
     legacy_slugs: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class OptionContract:
+    name: str
+    instrument_key: str
+    underlying_category: str
+    underlying_slug: str
+    expiry_type: str
+    expiry_date: date
+    strike_price: str
+    option_type: str
+
+
 IndexCategory = InstrumentCategory
 IndexInstrument = MarketInstrument
+DataInstrument: TypeAlias = MarketInstrument | OptionContract

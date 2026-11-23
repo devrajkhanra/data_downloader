@@ -1,37 +1,43 @@
+import sqlite3
 from datetime import date
 from getpass import getpass
 
+from market_data_downloader.application import DownloadApplication
 from market_data_downloader.catalog import ALL_INDICES, BROAD_INDICES, SECTORAL_INDICES
 from market_data_downloader.date_ranges import parse_iso_date
-from market_data_downloader.downloader import download_instrument, next_start_date
-from market_data_downloader.models import InstrumentCategory, MarketInstrument
+from market_data_downloader.download_engine import DEFAULT_MAX_WORKERS
+from market_data_downloader.job_models import (
+    DownloadProgress,
+    JobItemStatus,
+    JobStatus,
+)
+from market_data_downloader.models import (
+    DataInstrument,
+    InstrumentCategory,
+    MarketInstrument,
+)
 from market_data_downloader.nse_industries import (
     StockIndustryLookupError,
-    classify_nse_industries,
     count_uncached_industries,
 )
-from market_data_downloader.paths import DATA_ROOT
+from market_data_downloader.option_catalog import OptionCatalogError, load_option_contracts
 from market_data_downloader.stock_catalog import (
     EQUITY_LIST_PATH,
     InstrumentMasterError,
     load_nse_stocks,
 )
-from market_data_downloader.storage import (
-    data_file_path,
-    get_last_date_from_csv,
-    migrate_legacy_stock_file,
-)
-from market_data_downloader.upstox_client import UpstoxApiError, UpstoxClient
+from market_data_downloader.stock_service import prepare_stock_instruments
 
 
-def _choose_instruments() -> tuple[MarketInstrument, ...]:
+def _choose_instruments() -> tuple[DataInstrument, ...]:
     print("Select data to download:")
     print("1. Broad-market indices")
     print("2. Sectoral indices")
     print("3. All supported indices")
     print("4. Select one index")
     print("5. All NSE cash-equity instruments")
-    choice = input("Choice (1-5): ").strip()
+    print("6. Listed weekly and monthly options (indices and F&O stocks)")
+    choice = input("Choice (1-6): ").strip()
 
     if choice == "1":
         return BROAD_INDICES
@@ -97,7 +103,64 @@ def _choose_instruments() -> tuple[MarketInstrument, ...]:
             return ()
         return stocks
 
-    print("Invalid choice. Enter a number from 1 to 5.")
+    if choice == "6":
+        try:
+            catalog = load_option_contracts()
+        except OptionCatalogError as exc:
+            print(f"Could not load option contracts: {exc}")
+            return ()
+        if catalog.equity_list_refreshed:
+            print("Refreshed the current NSE equity list.")
+        else:
+            print(
+                f"WARNING: Could not refresh the NSE equity list "
+                f"({catalog.equity_list_warning}). Using the saved "
+                f"{EQUITY_LIST_PATH.name}, which may be outdated."
+            )
+            if (
+                input("Continue using this saved list? (y/N): ")
+                .strip()
+                .lower()
+                != "y"
+            ):
+                print("Option download cancelled.")
+                return ()
+
+        contracts = catalog.contracts
+        if not contracts:
+            print("No currently listed option contracts matched supported underlyings.")
+            return ()
+        weekly_count = sum(
+            contract.expiry_type == "weekly" for contract in contracts
+        )
+        monthly_count = len(contracts) - weekly_count
+        print(
+            f"Found {len(contracts):,} currently listed option contracts across "
+            f"{catalog.index_underlyings} supported indices and "
+            f"{catalog.stock_underlyings} active F&O stocks "
+            f"({weekly_count:,} weekly and {monthly_count:,} monthly)."
+        )
+        print(
+            "This includes every listed strike and both call/put contracts. "
+            "Expired contracts are not included. Downloading this many "
+            "contracts can take a long time and use substantial API quota."
+        )
+        if catalog.skipped_underlyings:
+            print(
+                f"Skipped {len(catalog.skipped_underlyings)} option underlyings "
+                "not in the supported index or active NSE stock catalog."
+            )
+        if (
+            input("Continue with all these option contracts? (y/N): ")
+            .strip()
+            .lower()
+            != "y"
+        ):
+            print("Option download cancelled.")
+            return ()
+        return contracts
+
+    print("Invalid choice. Enter a number from 1 to 6.")
     return ()
 
 
@@ -119,14 +182,26 @@ def main() -> int:
     print("Upstox NSE Market Data Downloader")
     print("=================================")
 
+    application = DownloadApplication()
     instruments = _choose_instruments()
     if not instruments:
         return 2
 
-    if instruments[0].category is InstrumentCategory.STOCKS:
-        cache_path = DATA_ROOT / ".stock_industry_cache.json"
+    if (
+        isinstance(instruments[0], MarketInstrument)
+        and instruments[0].category is InstrumentCategory.STOCKS
+    ):
+        stock_instruments = tuple(
+            instrument
+            for instrument in instruments
+            if isinstance(instrument, MarketInstrument)
+        )
+        cache_path = application.data_root / ".stock_industry_cache.json"
         try:
-            uncached_count = count_uncached_industries(instruments, cache_path)
+            uncached_count = count_uncached_industries(
+                stock_instruments,
+                cache_path,
+            )
         except StockIndustryLookupError as exc:
             print(f"Could not inspect NSE industry cache: {exc}")
             return 1
@@ -158,13 +233,12 @@ def main() -> int:
                 )
 
         try:
-            instruments = classify_nse_industries(
-                instruments,
-                cache_path,
+            instruments = prepare_stock_instruments(
+                stock_instruments,
+                application.data_root,
+                cache_path=cache_path,
                 on_progress=report_sector_progress,
             )
-            for instrument in instruments:
-                migrate_legacy_stock_file(DATA_ROOT, instrument)
         except (StockIndustryLookupError, OSError, ValueError) as exc:
             print(f"Could not classify or migrate stock data: {exc}")
             return 1
@@ -184,10 +258,11 @@ def main() -> int:
         return 2
 
     try:
+        repository = application.create_market_data_repository()
         instruments_without_data = [
             instrument
             for instrument in instruments
-            if get_last_date_from_csv(data_file_path(DATA_ROOT, instrument)) is None
+            if repository.latest_date(instrument) is None
         ]
     except (OSError, ValueError) as exc:
         print(f"Could not inspect existing CSV data: {exc}")
@@ -196,67 +271,79 @@ def main() -> int:
     first_download_date = (
         _read_initial_start_date() if instruments_without_data else None
     )
-    client = UpstoxClient(access_token)
     end_date = date.today()
-    failed_instruments: list[str] = []
-    skipped_after_error = 0
-
-    for number, instrument in enumerate(instruments, start=1):
-        try:
-            start_date = next_start_date(
-                DATA_ROOT,
-                instrument,
-                first_download_date,
-            )
-            if start_date > end_date:
-                latest_date = get_last_date_from_csv(
-                    data_file_path(DATA_ROOT, instrument)
-                )
-                print(f"[{number}/{len(instruments)}] {instrument.name}: current through {latest_date}.")
-                continue
-
-            print(
-                f"\n[{number}/{len(instruments)}] {instrument.name}: "
-                f"downloading from {start_date}..."
-            )
-            saved_count = download_instrument(
-                client,
-                DATA_ROOT,
-                instrument,
-                start_date,
-                end_date,
-            )
-            if saved_count:
-                print(f"{instrument.name}: saved {saved_count} candles.")
-            else:
-                print(f"{instrument.name}: no new candles returned.")
-        except UpstoxApiError as exc:
-            failed_instruments.append(instrument.name)
-            print(f"{instrument.name}: download failed: {exc}")
-            if (
-                exc.status_code is None
-                or exc.status_code in {401, 403, 429}
-                or exc.status_code >= 500
-            ):
-                skipped_after_error = len(instruments) - number
-                print("Stopping after a connection, authentication, or API-wide error.")
-                break
-        except (OSError, ValueError) as exc:
-            failed_instruments.append(instrument.name)
-            print(f"{instrument.name}: download failed: {exc}")
-
-    if failed_instruments:
-        shown_failures = ", ".join(failed_instruments[:10])
-        if len(failed_instruments) > 10:
-            shown_failures += f", and {len(failed_instruments) - 10} more"
-        print(f"\n{len(failed_instruments)} instrument(s) failed: {shown_failures}")
-    if skipped_after_error:
-        print(
-            f"{skipped_after_error} remaining instrument(s) were skipped. "
-            "Run again to resume from each CSV's latest date."
+    try:
+        job_store = application.create_job_store()
+        engine = application.create_download_engine(
+            access_token,
+            max_workers=DEFAULT_MAX_WORKERS,
+            job_store=job_store,
+            repository=repository,
         )
-    if failed_instruments:
+        job_id = engine.create_job(
+            tuple(instruments),
+            first_download_date,
+            end_date,
+        )
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        print(f"Could not create download job: {exc}")
         return 1
 
-    print("\nDownload run complete.")
-    return 0
+    print(
+        f"\nDownload job {job_id} queued with "
+        f"{engine.max_workers} concurrent workers."
+    )
+    print(f"Job state is saved in {application.job_database_path}.")
+    progress_interval = max(1, len(instruments) // 100)
+
+    def report_progress(progress: DownloadProgress) -> None:
+        if (
+            progress.completed_items % progress_interval == 0
+            or progress.completed_items == progress.total_items
+            or progress.item_status is JobItemStatus.FAILED
+        ):
+            print(
+                f"[{progress.completed_items}/{progress.total_items}] "
+                f"{progress.instrument_name}: {progress.item_status.value}"
+                + (
+                    f", saved {progress.saved_candles} candles"
+                    if progress.saved_candles
+                    else ""
+                )
+                + (f" - {progress.error}" if progress.error else "")
+            )
+
+    try:
+        job = engine.run_job(job_id, on_progress=report_progress)
+    except (OSError, ValueError, RuntimeError, KeyError, sqlite3.Error) as exc:
+        print(f"Download job {job_id} stopped: {exc}")
+        return 1
+
+    print(
+        f"\nJob {job.status.value}: "
+        f"{job.succeeded_items} downloaded, {job.no_data_items} empty, "
+        f"{job.failed_items} failed, {job.pending_items} remaining."
+    )
+    if job.error:
+        print(job.error)
+    if job.status is JobStatus.COMPLETED:
+        print("Download run complete.")
+        return 0
+
+    try:
+        failed_items = job_store.get_items(
+            job_id,
+            statuses=(JobItemStatus.FAILED,),
+        )
+    except sqlite3.Error as exc:
+        print(f"Could not read failed job items: {exc}")
+        return 1
+    if failed_items:
+        shown_failures = ", ".join(
+            item.instrument.name for item in failed_items[:10]
+        )
+        if len(failed_items) > 10:
+            shown_failures += f", and {len(failed_items) - 10} more"
+        print(f"Failed instruments: {shown_failures}")
+    print("Existing CSV data is preserved; rerun the download to resume.")
+    return 1
